@@ -2,6 +2,9 @@ import * as THREE_NS from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { PIECE_TACTICAL_CONFIG, createPieceTacticalRing, createPieceTacticalSprite } from './engine/tacticalBadges.js';
+import { loadAdaptiveMemory, saveAdaptiveMemory, getAdaptivePersona, selectAdaptiveAIMove } from './engine/adaptiveAI.js';
+import { TOURNAMENT_MASTERS, loadTournamentState, saveTournamentState, getCurrentMaster, advanceTournamentStage, resetTournament } from './engine/tournament.js';
 
 /** @type {any} */
 const THREE = THREE_NS;
@@ -1441,10 +1444,13 @@ export function initWizardChess() {
     let capturedByBlack = 0;
 
     // Mode & Player Configuration
-    let gameMode = 'single'; // 'single' | 'multi'
+    let gameMode = 'single'; // 'single' | 'pvp' | 'tournament' | 'multi'
     let playerColor = 'w';   // 'w' | 'b' | 'spectator'
     let aiAutoPlay = true;
     let aiTimer = null;
+    let areTacticalBadgesEnabled = true;
+    let pvpAutoFlipCamera = true;
+    let activeTournamentMaster = null;
 
     // Multiplayer State
     let roomCode = null;
@@ -1555,12 +1561,25 @@ export function initWizardChess() {
       root.rotation.y = color === 'w' ? Math.PI : 0;
       scene.add(root);
 
+      // 1. Tactical Pedestal Ring (identifies piece type and color from top, side, and all camera angles)
+      const ringMesh = createPieceTacticalRing(type, THREE);
+      root.add(ringMesh);
+
+      // 2. Floating Billboard Tactical Crest Sprite
+      const badgeSprite = createPieceTacticalSprite(type, color, THREE);
+      const pieceH = PIECE_HEIGHTS[type] || 0.45;
+      badgeSprite.position.set(0, (pieceH / BOARD_SQ_SIZE) + 0.22, 0);
+      badgeSprite.visible = areTacticalBadgesEnabled;
+      root.add(badgeSprite);
+
       const pieceObj = {
         type,
         color,
         r,
         c,
         mesh: root,
+        tacticalRing: ringMesh,
+        tacticalBadge: badgeSprite,
         mixer,
         actions,
         currentAction: null,
@@ -2518,6 +2537,31 @@ export function initWizardChess() {
 
         currentTurn = currentTurn === 'w' ? 'b' : 'w';
         isAnimatingMove = false;
+
+        // Player adaptive learning telemetry
+        if ((gameMode === 'single' || gameMode === 'tournament') && piece.color === playerColor) {
+          try {
+            const mem = loadAdaptiveMemory();
+            if ((playerColor === 'w' && toR <= 3) || (playerColor === 'b' && toR >= 4)) {
+              mem.aggressionScore = Math.min(100, (mem.aggressionScore || 50) + 2);
+            }
+            if (piece.type === 'queen' && moveHistory.length < 8) {
+              mem.earlyQueenMoves = (mem.earlyQueenMoves || 0) + 1;
+              mem.aggressionScore = Math.min(100, (mem.aggressionScore || 50) + 3);
+            }
+            if (isCastling) {
+              mem.defenseScore = Math.min(100, (mem.defenseScore || 50) + 4);
+            }
+            saveAdaptiveMemory(mem);
+          } catch (e) {}
+        }
+
+        // PvP Camera Auto-Flip to active player's side
+        if (gameMode === 'pvp' && pvpAutoFlipCamera) {
+          playerCamSide = currentTurn === 'w' ? 'w' : 'b';
+          setCameraForSide(playerCamSide, false);
+        }
+
         updateTurnUI();
         maybeScheduleAIMove();
       }
@@ -2744,67 +2788,15 @@ export function initWizardChess() {
     // Single-Player Tactical AI (Auto-Plays Opponent Turn + Manual AI Button)
     // =========================================================================
     function chooseSmartAIMove(color) {
-      const legalMoves = getAllLegalMoves(color);
-      if (legalMoves.length === 0) return null;
-
-      let bestScore = -Infinity;
-      let bestCandidates = [];
-
-      for (const m of legalMoves) {
-        const piece = boardState[m.fromR][m.fromC];
-        const target = boardState[m.toR][m.toC];
-        let score = 0;
-
-        // Material gain on capture
-        if (target) {
-          score += PIECE_VALUES[target.type] * 1.15 - PIECE_VALUES[piece.type] * 0.08;
-        }
-
-        // Center control bonus
-        const centerDist = Math.abs(3.5 - m.toR) + Math.abs(3.5 - m.toC);
-        score += (7 - centerDist) * 8;
-
-        // Pawn advancement bonus
-        if (piece.type === 'pawn') {
-          const advance = color === 'w' ? (6 - m.toR) : (m.toR - 1);
-          score += advance * 12;
-        }
-
-        // Simulate move to check if destination is hanging or gives check
-        boardState[m.toR][m.toC] = piece;
-        boardState[m.fromR][m.fromC] = null;
-        const oppColor = color === 'w' ? 'b' : 'w';
-        if (isKingInCheck(oppColor, boardState)) {
-          score += 45;
-        }
-        // Check if opponent can recapture on destination square
-        for (let rr = 0; rr < 8; rr++) {
-          for (let cc = 0; cc < 8; cc++) {
-            const opp = boardState[rr][cc];
-            if (opp && opp.color === oppColor) {
-              const oppMoves = getPseudoMovesForPiece(rr, cc, boardState);
-              if (oppMoves.some((om) => om.r === m.toR && om.c === m.toC)) {
-                score -= PIECE_VALUES[piece.type] * 0.75;
-                break;
-              }
-            }
-          }
-        }
-        boardState[m.fromR][m.fromC] = piece;
-        boardState[m.toR][m.toC] = target;
-
-        // Small jitter so AI varies openings
-        score += (Math.random() - 0.5) * 14;
-
-        if (score > bestScore + 1) {
-          bestScore = score;
-          bestCandidates = [m];
-        } else if (Math.abs(score - bestScore) <= 1) {
-          bestCandidates.push(m);
-        }
+      if (gameMode === 'tournament') {
+        const tState = loadTournamentState();
+        const master = getCurrentMaster(tState);
+        return selectAdaptiveAIMove(boardState, color, getAllLegalMoves, master.depth || 3);
       }
-
-      return bestCandidates[Math.floor(Math.random() * bestCandidates.length)] || legalMoves[0];
+      const mem = loadAdaptiveMemory();
+      const persona = getAdaptivePersona(mem);
+      const searchDepth = Math.min(4, 2 + Math.floor(persona.level / 3));
+      return selectAdaptiveAIMove(boardState, color, getAllLegalMoves, searchDepth);
     }
 
     function triggerAIMoveNow() {
@@ -2821,7 +2813,8 @@ export function initWizardChess() {
       }
       if (gameOver || isAnimatingMove || preMoveHighlightTask) return;
       if (scriptedGameActive) return;
-      if (gameMode !== 'single' || !aiAutoPlay) return;
+      if (gameMode !== 'single' && gameMode !== 'tournament') return;
+      if (!aiAutoPlay) return;
 
       const aiColor = playerColor === 'w' ? 'b' : 'w';
       if (currentTurn === aiColor) {
@@ -2829,7 +2822,7 @@ export function initWizardChess() {
           aiTimer = null;
           if (
             !scriptedGameActive &&
-            gameMode === 'single' &&
+            (gameMode === 'single' || gameMode === 'tournament') &&
             currentTurn === aiColor &&
             !isAnimatingMove &&
             !gameOver
@@ -3248,6 +3241,65 @@ export function initWizardChess() {
       return shouldHide;
     }
 
+    function toggleTacticalBadges(force) {
+      areTacticalBadgesEnabled = force !== undefined ? Boolean(force) : !areTacticalBadgesEnabled;
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          const p = boardState[r][c];
+          if (p && p.tacticalBadge) {
+            p.tacticalBadge.visible = areTacticalBadgesEnabled;
+          }
+        }
+      }
+      const btn = document.getElementById('btn-toggle-badges');
+      if (btn) {
+        btn.textContent = areTacticalBadgesEnabled ? '✦ Badges: ON' : '✦ Badges: OFF';
+        btn.classList.toggle('active', areTacticalBadgesEnabled);
+      }
+      return areTacticalBadgesEnabled;
+    }
+
+    function setGameMode(mode) {
+      if (mode === 'pvp') {
+        gameMode = 'pvp';
+        aiAutoPlay = false;
+        if (aiTimer) {
+          clearTimeout(aiTimer);
+          aiTimer = null;
+        }
+        resetChessBoard(true, false);
+      } else if (mode === 'tournament') {
+        gameMode = 'tournament';
+        playerColor = 'w';
+        aiAutoPlay = true;
+        const tState = loadTournamentState();
+        activeTournamentMaster = getCurrentMaster(tState);
+        resetChessBoard(true, false);
+      } else {
+        gameMode = 'single';
+        aiAutoPlay = true;
+        resetChessBoard(true, false);
+      }
+      updateTurnUI();
+    }
+
+    function startTournamentStage(stageIdx) {
+      gameMode = 'tournament';
+      playerColor = 'w';
+      aiAutoPlay = true;
+      const tState = loadTournamentState();
+      tState.currentStageIndex = stageIdx;
+      saveTournamentState(tState);
+      activeTournamentMaster = getCurrentMaster(tState);
+      resetChessBoard(true, false);
+      updateTurnUI();
+    }
+
+    function setPvpAutoFlip(force) {
+      pvpAutoFlipCamera = force !== undefined ? Boolean(force) : !pvpAutoFlipCamera;
+      return pvpAutoFlipCamera;
+    }
+
     // =========================================================================
     // Feature 4: Video-Game Style WASD + R/F Translation & Arrow-Key Rotation
     // with Configurable Speed (Default 10%) & Smooth Ease-In / Ease-Out
@@ -3400,10 +3452,41 @@ export function initWizardChess() {
       const defeatedName = defeatedColor === 'w' ? 'White' : 'Black';
 
       if (crownEl) crownEl.textContent = winnerColor === 'w' ? '♔' : '♚';
-      if (titleEl) titleEl.textContent = 'Checkmate';
-      if (subEl) {
-        subEl.textContent = `${winnerName} Triumphs • The ${defeatedName} King Has Fallen`;
+
+      if (gameMode === 'tournament') {
+        const tState = loadTournamentState();
+        const master = getCurrentMaster(tState);
+        if (winnerColor === playerColor) {
+          advanceTournamentStage(tState);
+          if (titleEl) titleEl.textContent = 'Stage Victory!';
+          if (subEl) subEl.textContent = `You Defeated ${master.name}! ${master.winDialogue}`;
+        } else {
+          if (titleEl) titleEl.textContent = 'Defeat in the Sanctum';
+          if (subEl) subEl.textContent = `${master.name} claimed victory. Re-enter the tournament to ascend!`;
+        }
+      } else if (gameMode === 'pvp') {
+        const winnerP = winnerColor === 'w' ? 'Player 1 (White)' : 'Player 2 (Black)';
+        if (titleEl) titleEl.textContent = `${winnerP} Wins!`;
+        if (subEl) subEl.textContent = `Checkmate on the Altar • The ${defeatedName} King Has Fallen`;
+      } else {
+        if (titleEl) titleEl.textContent = 'Checkmate';
+        if (subEl) {
+          subEl.textContent = `${winnerName} Triumphs • The ${defeatedName} King Has Fallen`;
+        }
       }
+
+      // Record match outcome in adaptive memory
+      try {
+        const mem = loadAdaptiveMemory();
+        mem.gamesPlayed = (mem.gamesPlayed || 0) + 1;
+        if (winnerColor === playerColor) {
+          mem.playerWins = (mem.playerWins || 0) + 1;
+        } else {
+          mem.aiWins = (mem.aiWins || 0) + 1;
+        }
+        saveAdaptiveMemory(mem);
+      } catch (e) {}
+
       if (overlay) {
         overlay.classList.add('visible');
       }
@@ -3683,9 +3766,12 @@ export function initWizardChess() {
           turnText.textContent = 'Stalemate — Draw';
         }
       } else {
-        const turnLabel = currentTurn === 'w' ? 'White to Move' : 'Black to Move';
+        let turnLabel = currentTurn === 'w' ? 'White to Move' : 'Black to Move';
+        if (gameMode === 'pvp') {
+          turnLabel = currentTurn === 'w' ? "Player 1 (White)'s Turn" : "Player 2 (Black)'s Turn";
+        }
         const aiColor = playerColor === 'w' ? 'b' : 'w';
-        const isAiTurn = !scriptedGameActive && gameMode === 'single' && currentTurn === aiColor;
+        const isAiTurn = !scriptedGameActive && (gameMode === 'single' || gameMode === 'tournament') && currentTurn === aiColor;
         if (inCheck) {
           turnText.textContent = `${turnLabel} (Check!)`;
         } else if (isAiTurn) {
@@ -3696,7 +3782,24 @@ export function initWizardChess() {
       }
 
       if (modeBadge) {
-        modeBadge.textContent = `Playing as ${playerColor === 'w' ? 'White' : 'Black'}`;
+        if (gameMode === 'pvp') {
+          modeBadge.textContent = 'Pass & Play (PvP)';
+        } else if (gameMode === 'tournament') {
+          const tState = loadTournamentState();
+          const master = getCurrentMaster(tState);
+          modeBadge.textContent = `🏆 ${master.stageName} vs ${master.name} (${master.rating})`;
+        } else {
+          modeBadge.textContent = `Playing as ${playerColor === 'w' ? 'White' : 'Black'} (Adaptive AI)`;
+        }
+      }
+
+      const aiMindBtn = document.getElementById('btn-ai-mind-pill');
+      if (aiMindBtn) {
+        try {
+          const mem = loadAdaptiveMemory();
+          const pers = getAdaptivePersona(mem);
+          aiMindBtn.innerHTML = `<span>${pers.badge}</span><span>${pers.title} (Lvl ${pers.level})</span>`;
+        } catch (e) {}
       }
       if (btnAiMove) {
         btnAiMove.style.display = 'inline-flex';
@@ -3733,9 +3836,9 @@ export function initWizardChess() {
       if (moveDist > 6) return;
       if (isAnimatingMove || gameOver) return;
 
-      // Enforce turn ownership in Multiplayer, and in Single Player only block while AI auto-move timer is actively pending
+      // Enforce turn ownership in Multiplayer, and in Single Player/Tournament only block while AI auto-move timer is actively pending
       if (gameMode === 'multi' && currentTurn !== playerColor) return;
-      if (!scriptedGameActive && gameMode === 'single' && currentTurn !== playerColor && aiTimer !== null) return;
+      if (!scriptedGameActive && (gameMode === 'single' || gameMode === 'tournament') && currentTurn !== playerColor && aiTimer !== null) return;
 
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -3807,6 +3910,45 @@ export function initWizardChess() {
         selectedSquare = null;
         validMoves = [];
       }
+    });
+
+    // Hover detection for Tactical Piece Banner
+    renderer.domElement.addEventListener('pointermove', (e) => {
+      if (isAnimatingMove || gameOver) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+
+      const pieceMeshes = [];
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          if (boardState[r][c] && boardState[r][c].mesh) {
+            pieceMeshes.push(boardState[r][c].mesh);
+          }
+        }
+      }
+      const hits = raycaster.intersectObjects(pieceMeshes, true);
+      const hoverBanner = document.getElementById('piece-hover-banner');
+      if (hits.length > 0) {
+        let obj = hits[0].object;
+        while (obj) {
+          if (obj.userData && obj.userData.piece) {
+            const p = obj.userData.piece;
+            if (hoverBanner) {
+              const file = String.fromCharCode(97 + p.c);
+              const rank = 8 - p.r;
+              const colorName = p.color === 'w' ? 'White' : 'Black';
+              const cfg = PIECE_TACTICAL_CONFIG[p.type] || {};
+              hoverBanner.style.display = 'inline-flex';
+              hoverBanner.textContent = `${cfg.symbol || '✦'} ${colorName} ${cfg.label || p.type} (${file}${rank})`;
+            }
+            return;
+          }
+          obj = obj.parent;
+        }
+      }
+      if (hoverBanner) hoverBanner.style.display = 'none';
     });
 
     // =========================================================================
@@ -4423,6 +4565,10 @@ export function initWizardChess() {
       prevFloorStoneLook,
       WALL_STONE_LOOKS,
       FLOOR_STONE_LOOKS,
+      setGameMode,
+      startTournamentStage,
+      toggleTacticalBadges,
+      setPvpAutoFlip,
       holdCameraKey: (code, down = true) => {
         if (down) heldCameraKeys.add(code);
         else heldCameraKeys.delete(code);
