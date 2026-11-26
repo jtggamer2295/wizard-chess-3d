@@ -1077,3 +1077,145 @@ body.cinematic-ui-hidden #hud-bottom {
   line-height: 1.5;
   color: var(--text);
 }
+
+
+/* Pawn Promotion Modal & Scoreboard Styles */
+.promotion-modal-box {
+  max-width: 480px;
+}
+
+.promotion-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.promotion-choice-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 16px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(212, 175, 55, 0.35);
+  background: rgba(24, 21, 32, 0.9);
+  color: var(--ink, #f4efe6);
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.promotion-choice-btn:hover {
+  transform: translateY(-2px);
+  border-color: #d4af37;
+  background: rgba(212, 175, 55, 0.18);
+}
+
+.promotion-symbol {
+  font-size: 2.2rem;
+  line-height: 1;
+}
+
+.promotion-label {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.promotion-pts {
+  font-size: 0.72rem;
+  color: var(--muted, #b5ab99);
+}
+
+.scoreboard-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.scoreboard-history-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.84rem;
+}
+
+.difficulty-segmented-group {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+
+@media (max-width: 520px) {
+  .promotion-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+
+/* Visual Captured Pieces & Material Advantage Tray */
+#captured-tray {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#captured-tray:empty {
+  display: none;
+}
+
+.cap-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.cap-side-tag {
+  font-size: 0.9rem;
+  opacity: 0.7;
+  margin-right: 2px;
+}
+
+.cap-side-tag.white {
+  color: #f4efe6;
+}
+
+.cap-side-tag.black {
+  color: #a99bd4;
+}
+
+.cap-icon {
+  font-size: 1.15rem;
+  line-height: 1;
+  display: inline-block;
+}
+
+.cap-icon.white-piece {
+  color: #f7f0dc;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+}
+
+.cap-icon.black-piece {
+  color: #b8a9e8;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+
+.cap-adv-badge {
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #16131f;
+  background: linear-gradient(135deg, #f3d27a, #d4af37);
+}
+
+.cap-divider {
+  opacity: 0.45;
+  margin: 0 2px;
+}

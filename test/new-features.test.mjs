@@ -5,7 +5,9 @@ import {
   PIECE_VALUES,
   loadAdaptiveMemory,
   getAdaptivePersona,
-  evaluateBoard
+  evaluateBoard,
+  AI_DIFFICULTY_LEVELS,
+  getDifficultyConfig
 } from '../src/engine/adaptiveAI.js';
 import {
   TOURNAMENT_MASTERS,
@@ -13,6 +15,14 @@ import {
   advanceTournamentStage,
   getCurrentMaster
 } from '../src/engine/tournament.js';
+import {
+  recordMatchScore,
+  loadScoreboard,
+  resetScoreboard,
+  computeMaterialScore
+} from '../src/engine/scoreboard.js';
+import fs from 'node:fs';
+import path from 'node:path';
 
 test('Tactical Piece Badges configuration covers all 6 piece types with distinct colors & symbols', () => {
   const pieceTypes = ['king', 'queen', 'rook', 'bishop', 'knight', 'pawn'];
@@ -106,4 +116,66 @@ test('Cathedral Grand Tournament contains 4 progressive stages culminating in Ar
 
   state = advanceTournamentStage(state);
   assert.ok(state.isComplete);
+});
+
+
+test('AI Difficulty Levels span easy through grandmaster with increasing search depth', () => {
+  assert.equal(AI_DIFFICULTY_LEVELS.length, 4);
+  const depths = AI_DIFFICULTY_LEVELS.map((d) => d.depth);
+  assert.deepEqual(depths, [1, 2, 3, 4]);
+  assert.equal(getDifficultyConfig('easy').label, 'Novice');
+  assert.equal(getDifficultyConfig('grandmaster').depth, 4);
+  assert.equal(getDifficultyConfig('unknown_id').id, 'medium');
+});
+
+test('Scoreboard records wins, losses, draws, and material advantage accurately', () => {
+  // Mock localStorage in Node
+  const store = {};
+  globalThis.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); }
+  };
+
+  resetScoreboard();
+  let sb = recordMatchScore('single', 'w', 'w', 'Checkmate', 24);
+  assert.equal(sb.single.wins, 1);
+  assert.equal(sb.single.streak, 1);
+  assert.equal(sb.single.bestStreak, 1);
+
+  sb = recordMatchScore('single', 'b', 'w', 'Checkmate', 31);
+  assert.equal(sb.single.losses, 1);
+  assert.equal(sb.single.streak, 0);
+  assert.equal(sb.single.bestStreak, 1);
+
+  sb = recordMatchScore('pvp', 'b', 'w', 'Checkmate', 40);
+  assert.equal(sb.pvp.blackWins, 1);
+
+  sb = recordMatchScore('pvp', 'draw', 'w', 'Stalemate', 52);
+  assert.equal(sb.pvp.draws, 1);
+  assert.equal(loadScoreboard().recentMatches.length, 4);
+
+  // Material advantage calculation
+  const board = Array.from({ length: 8 }, () => Array(8).fill(null));
+  board[0][0] = { type: 'queen', color: 'w' }; // 9
+  board[7][0] = { type: 'rook', color: 'b' };  // 5
+  const mat = computeMaterialScore(board);
+  assert.equal(mat.whitePoints, 9);
+  assert.equal(mat.blackPoints, 5);
+  assert.equal(mat.diff, 4);
+  assert.equal(mat.label, 'White +4');
+});
+
+test('Standard Chess Pawn Promotion supports queen, rook, bishop, and knight', () => {
+  const engineSrc = fs.readFileSync(path.resolve('src/wizardChessEngine.js'), 'utf8');
+  assert.ok(engineSrc.includes("const validPromotions = ['queen', 'rook', 'bishop', 'knight']"));
+  assert.ok(engineSrc.includes('completePendingPromotion'));
+  assert.ok(engineSrc.includes('wizardchess:promotion-required'));
+
+  const appSrc = fs.readFileSync(path.resolve('src/App.tsx'), 'utf8');
+  assert.ok(appSrc.includes('id="promotion-modal"'));
+  assert.ok(appSrc.includes('btn-promote-${opt.type}'));
+  assert.ok(appSrc.includes("type: 'knight'"));
+  assert.ok(appSrc.includes("type: 'rook'"));
+  assert.ok(appSrc.includes("type: 'bishop'"));
+  assert.ok(appSrc.includes("type: 'queen'"));
 });

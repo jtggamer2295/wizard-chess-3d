@@ -1,14 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import { initWizardChess } from './wizardChessEngine.js';
 import { TOURNAMENT_MASTERS, loadTournamentState } from './engine/tournament.js';
-import { loadAdaptiveMemory, getAdaptivePersona } from './engine/adaptiveAI.js';
+import {
+  loadAdaptiveMemory,
+  getAdaptivePersona,
+  AI_DIFFICULTY_LEVELS,
+  loadDifficulty,
+  getDifficultyConfig
+} from './engine/adaptiveAI.js';
+import { loadScoreboard, resetScoreboard } from './engine/scoreboard.js';
 
 export default function App() {
   const initializedRef = useRef(false);
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const [tournamentOpen, setTournamentOpen] = useState(false);
   const [aiMindOpen, setAiMindOpen] = useState(false);
+  const [scoreboardOpen, setScoreboardOpen] = useState(false);
+  const [pendingPromotion, setPendingPromotion] = useState<{ color: 'w' | 'b' } | null>(null);
   const [gameMode, setGameMode] = useState<'single' | 'pvp' | 'tournament'>('single');
+  const [difficulty, setDifficulty] = useState<string>(loadDifficulty());
+  const [scoreboard, setScoreboard] = useState(loadScoreboard());
   const [tacticalBadgesOn, setTacticalBadgesOn] = useState(true);
   const [pvpAutoFlipOn, setPvpAutoFlipOn] = useState(true);
   const [tournamentState, setTournamentState] = useState(loadTournamentState());
@@ -26,6 +37,12 @@ export default function App() {
         setMobileSheetOpen(false);
         setTournamentOpen(false);
         setAiMindOpen(false);
+        setScoreboardOpen(false);
+        if (pendingPromotion) {
+          const win = window as unknown as { wizardChess?: { cancelPendingPromotion?: () => void } };
+          win.wizardChess?.cancelPendingPromotion?.();
+          setPendingPromotion(null);
+        }
       }
     };
     const handleResize = () => {
@@ -33,13 +50,35 @@ export default function App() {
         setMobileSheetOpen(false);
       }
     };
+    const handlePromotionRequired = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      setPendingPromotion({ color: detail?.color === 'b' ? 'b' : 'w' });
+    };
+    const handlePromotionCleared = () => {
+      setPendingPromotion(null);
+    };
+    const handleScoreUpdated = () => {
+      setScoreboard(loadScoreboard());
+    };
+    const handleDifficultyChanged = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.difficulty) setDifficulty(detail.difficulty);
+    };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('resize', handleResize);
+    window.addEventListener('wizardchess:promotion-required', handlePromotionRequired);
+    window.addEventListener('wizardchess:promotion-cleared', handlePromotionCleared);
+    window.addEventListener('wizardchess:score-updated', handleScoreUpdated);
+    window.addEventListener('wizardchess:difficulty-changed', handleDifficultyChanged);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('wizardchess:promotion-required', handlePromotionRequired);
+      window.removeEventListener('wizardchess:promotion-cleared', handlePromotionCleared);
+      window.removeEventListener('wizardchess:score-updated', handleScoreUpdated);
+      window.removeEventListener('wizardchess:difficulty-changed', handleDifficultyChanged);
     };
-  }, []);
+  }, [pendingPromotion]);
 
   const handleRestoreUI = () => {
     const win = window as unknown as { wizardChess?: { toggleUI?: (force?: boolean) => void } };
@@ -100,7 +139,42 @@ export default function App() {
     }
   };
 
+  const handleSelectDifficulty = (levelId: string) => {
+    setDifficulty(levelId);
+    const win = window as unknown as { wizardChess?: { setDifficulty?: (l: string) => void } };
+    if (win.wizardChess?.setDifficulty) {
+      win.wizardChess.setDifficulty(levelId);
+    }
+  };
+
+  const handleChoosePromotion = (pieceType: 'queen' | 'rook' | 'bishop' | 'knight') => {
+    setPendingPromotion(null);
+    const win = window as unknown as {
+      wizardChess?: { completePendingPromotion?: (p: string) => void };
+    };
+    win.wizardChess?.completePendingPromotion?.(pieceType);
+  };
+
+  const handleCancelPromotion = () => {
+    setPendingPromotion(null);
+    const win = window as unknown as {
+      wizardChess?: { cancelPendingPromotion?: () => void };
+    };
+    win.wizardChess?.cancelPendingPromotion?.();
+  };
+
+  const handleResetScoreboard = () => {
+    setScoreboard(resetScoreboard());
+  };
+
   const persona = getAdaptivePersona(adaptiveMemory);
+  const diffConfig = getDifficultyConfig(difficulty);
+  const hudScoreText =
+    gameMode === 'pvp'
+      ? `P1 ${scoreboard.pvp.whiteWins} – P2 ${scoreboard.pvp.blackWins} (D ${scoreboard.pvp.draws})`
+      : gameMode === 'tournament'
+      ? `W ${scoreboard.tournament.wins} – L ${scoreboard.tournament.losses} – D ${scoreboard.tournament.draws}`
+      : `W ${scoreboard.single.wins} – L ${scoreboard.single.losses} – D ${scoreboard.single.draws}`;
 
   return (
     <>
@@ -151,6 +225,20 @@ export default function App() {
           >
             <span>{persona.badge}</span>
             <span>{persona.title} (Lvl {persona.level})</span>
+          </button>
+
+          <button
+            type="button"
+            className="ai-mind-pill score-pill"
+            id="btn-scoreboard-pill"
+            onClick={() => {
+              setScoreboard(loadScoreboard());
+              setScoreboardOpen(true);
+            }}
+            title="View Match Scoreboard & History"
+          >
+            <span>📊</span>
+            <span>{hudScoreText}</span>
           </button>
         </div>
 
@@ -233,6 +321,29 @@ export default function App() {
               🏆 Tournament
             </button>
           </div>
+
+          {gameMode === 'single' && (
+            <>
+              <div className="mobile-sheet-section-label">
+                <span>AI Difficulty</span>
+                <span className="mobile-sheet-section-sub">{diffConfig.description}</span>
+              </div>
+              <div className="mode-segmented-group difficulty-segmented-group" style={{ gridColumn: 'span 6' }}>
+                {AI_DIFFICULTY_LEVELS.map((lvl) => (
+                  <button
+                    key={lvl.id}
+                    type="button"
+                    id={`btn-diff-${lvl.id}`}
+                    className={`mode-segment-btn ${difficulty === lvl.id ? 'active' : ''}`}
+                    title={lvl.description}
+                    onClick={() => handleSelectDifficulty(lvl.id)}
+                  >
+                    {lvl.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
 
           <div className="mobile-sheet-section-label">Game Actions</div>
 
@@ -478,6 +589,147 @@ export default function App() {
 
           <div style={{ fontSize: '0.78rem', color: 'var(--muted)', lineHeight: 1.5 }}>
             <strong>How the AI Learns:</strong> Every forward pawn push, early Queen development, king shelter sacrifice, or tactical blunder shifts the AI's internal Minimax weights in real time.
+          </div>
+        </div>
+      </div>
+
+      {/* Pawn Promotion Modal (Standard Chess Rules) */}
+      <div
+        className={`gothic-modal-overlay ${pendingPromotion ? 'open' : ''}`}
+        id="promotion-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Choose Pawn Promotion Piece"
+      >
+        <div className="gothic-modal-box promotion-modal-box" onClick={(e) => e.stopPropagation()}>
+          <div className="gothic-modal-header">
+            <div>
+              <div className="gothic-modal-title">
+                <span>{pendingPromotion?.color === 'b' ? '♛' : '♕'}</span>
+                <span>Pawn Promotion</span>
+              </div>
+              <div className="gothic-modal-subtitle">
+                Standard Chess Rules: Choose the piece your pawn ascends into.
+              </div>
+            </div>
+            <button
+              type="button"
+              className="gothic-modal-close"
+              onClick={handleCancelPromotion}
+              aria-label="Cancel Move"
+              title="Cancel Move (Esc)"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="promotion-grid">
+            {(
+              [
+                { type: 'queen', label: 'Queen', whiteSym: '♕', blackSym: '♛', pts: '9 pts' },
+                { type: 'rook', label: 'Rook', whiteSym: '♖', blackSym: '♜', pts: '5 pts' },
+                { type: 'bishop', label: 'Bishop', whiteSym: '♗', blackSym: '♝', pts: '3 pts' },
+                { type: 'knight', label: 'Knight', whiteSym: '♘', blackSym: '♞', pts: '3 pts' }
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.type}
+                type="button"
+                id={`btn-promote-${opt.type}`}
+                className="promotion-choice-btn"
+                onClick={() => handleChoosePromotion(opt.type)}
+              >
+                <span className="promotion-symbol">
+                  {pendingPromotion?.color === 'b' ? opt.blackSym : opt.whiteSym}
+                </span>
+                <span className="promotion-label">{opt.label}</span>
+                <span className="promotion-pts">{opt.pts}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Scoreboard Modal */}
+      <div
+        className={`gothic-modal-overlay ${scoreboardOpen ? 'open' : ''}`}
+        id="scoreboard-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Sanctum Scoreboard"
+        onClick={() => setScoreboardOpen(false)}
+      >
+        <div className="gothic-modal-box" onClick={(e) => e.stopPropagation()}>
+          <div className="gothic-modal-header">
+            <div>
+              <div className="gothic-modal-title">
+                <span>📊</span>
+                <span>Sanctum Scoreboard</span>
+              </div>
+              <div className="gothic-modal-subtitle">
+                Persistent match records across Adaptive AI, Pass &amp; Play PvP, and Tournament duels.
+              </div>
+            </div>
+            <button
+              type="button"
+              className="gothic-modal-close"
+              onClick={() => setScoreboardOpen(false)}
+              aria-label="Close Scoreboard"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="ai-mind-metrics">
+            <div className="metric-card">
+              <span className="metric-val">
+                {scoreboard.single.wins} – {scoreboard.single.losses} – {scoreboard.single.draws}
+              </span>
+              <span className="metric-label">Vs AI (W – L – D)</span>
+            </div>
+            <div className="metric-card">
+              <span className="metric-val">
+                {scoreboard.pvp.whiteWins} – {scoreboard.pvp.blackWins} – {scoreboard.pvp.draws}
+              </span>
+              <span className="metric-label">PvP (P1 – P2 – D)</span>
+            </div>
+            <div className="metric-card">
+              <span className="metric-val">
+                {scoreboard.single.streak} (Best {scoreboard.single.bestStreak})
+              </span>
+              <span className="metric-label">AI Win Streak</span>
+            </div>
+          </div>
+
+          <div className="ai-mind-insight-box">
+            <div className="ai-mind-insight-title">Recent Matches</div>
+            {scoreboard.recentMatches.length === 0 ? (
+              <div className="ai-mind-insight-text">No completed matches recorded yet.</div>
+            ) : (
+              <div className="scoreboard-history-list">
+                {scoreboard.recentMatches.map((m, idx) => (
+                  <div key={idx} className="scoreboard-history-row">
+                    <span>
+                      <strong>{m.outcome}</strong> ({m.mode.toUpperCase()})
+                    </span>
+                    <span style={{ color: 'var(--muted)', fontSize: '0.78rem' }}>
+                      {m.reason} • {m.moves} moves
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px' }}>
+            <button
+              type="button"
+              id="btn-reset-scoreboard"
+              className="hud-btn"
+              onClick={handleResetScoreboard}
+            >
+              Reset Scoreboard
+            </button>
           </div>
         </div>
       </div>

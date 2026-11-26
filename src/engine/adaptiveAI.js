@@ -5,6 +5,64 @@
  */
 
 const STORAGE_KEY = 'wizard_chess_adaptive_memory_v1';
+const DIFFICULTY_KEY = 'wizard_chess_difficulty_v1';
+
+export const AI_DIFFICULTY_LEVELS = [
+  {
+    id: 'easy',
+    label: 'Novice',
+    depth: 1,
+    blunderChance: 0.28,
+    noise: 35,
+    description: 'Depth 1 • Forgiving tactics for casual play'
+  },
+  {
+    id: 'medium',
+    label: 'Adept',
+    depth: 2,
+    blunderChance: 0.08,
+    noise: 12,
+    description: 'Depth 2 • Solid fundamentals with adaptive style'
+  },
+  {
+    id: 'hard',
+    label: 'Master',
+    depth: 3,
+    blunderChance: 0,
+    noise: 4,
+    description: 'Depth 3 • Deep Alpha-Beta & Quiescence calculation'
+  },
+  {
+    id: 'grandmaster',
+    label: 'Grandmaster',
+    depth: 4,
+    blunderChance: 0,
+    noise: 1,
+    description: 'Depth 4 • Relentless full-depth tactical search'
+  }
+];
+
+export function getDifficultyConfig(difficultyId) {
+  return AI_DIFFICULTY_LEVELS.find((d) => d.id === difficultyId) || AI_DIFFICULTY_LEVELS[1];
+}
+
+export function loadDifficulty() {
+  try {
+    const raw = localStorage.getItem(DIFFICULTY_KEY);
+    if (raw && AI_DIFFICULTY_LEVELS.some((d) => d.id === raw)) {
+      return raw;
+    }
+  } catch (e) {}
+  return 'medium';
+}
+
+export function saveDifficulty(difficultyId) {
+  const cfg = getDifficultyConfig(difficultyId);
+  try {
+    localStorage.setItem(DIFFICULTY_KEY, cfg.id);
+  } catch (e) {}
+  return cfg.id;
+}
 
 export const PIECE_VALUES = {
   pawn: 100,
@@ -333,13 +391,21 @@ function minimax(boardState, depth, alpha, beta, isMaximizing, color, currentSea
 /**
  * Main entry point for selecting the best adaptive AI move
  */
-export function selectAdaptiveAIMove(boardState, color, getAllLegalMoves, searchDepth = 3) {
+export function selectAdaptiveAIMove(boardState, color, getAllLegalMoves, searchDepth = 3, options = {}) {
   const legalMoves = getAllLegalMoves(color);
   if (legalMoves.length === 0) return null;
+
+  const blunderChance = Number(options.blunderChance) || 0;
+  const noiseAmp = options.noise !== undefined ? Number(options.noise) : 6;
 
   const memory = loadAdaptiveMemory();
   const persona = getAdaptivePersona(memory);
   const orderedMoves = orderMoves(legalMoves, boardState);
+
+  if (blunderChance > 0 && orderedMoves.length > 1 && Math.random() < blunderChance) {
+    const poolSize = Math.min(orderedMoves.length, 4);
+    return orderedMoves[Math.floor(Math.random() * poolSize)];
+  }
 
   let bestMove = orderedMoves[0];
   let bestScore = -Infinity;
@@ -357,7 +423,7 @@ export function selectAdaptiveAIMove(boardState, color, getAllLegalMoves, search
     let score = minimax(boardState, searchDepth - 1, alpha, beta, false, color, opp, getAllLegalMoves, persona);
 
     // Minor random noise to vary identical book evaluations
-    score += (Math.random() - 0.5) * 6;
+    score += (Math.random() - 0.5) * noiseAmp;
 
     boardState[m.fromR][m.fromC] = moved;
     boardState[m.toR][m.toC] = target;

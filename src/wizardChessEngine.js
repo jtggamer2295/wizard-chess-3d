@@ -3,8 +3,17 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { PIECE_TACTICAL_CONFIG, createPieceTacticalRing, createPieceTacticalSprite } from './engine/tacticalBadges.js';
-import { loadAdaptiveMemory, saveAdaptiveMemory, getAdaptivePersona, selectAdaptiveAIMove } from './engine/adaptiveAI.js';
+import {
+  loadAdaptiveMemory,
+  saveAdaptiveMemory,
+  getAdaptivePersona,
+  selectAdaptiveAIMove,
+  loadDifficulty,
+  saveDifficulty,
+  getDifficultyConfig
+} from './engine/adaptiveAI.js';
 import { TOURNAMENT_MASTERS, loadTournamentState, saveTournamentState, getCurrentMaster, advanceTournamentStage, resetTournament } from './engine/tournament.js';
+import { recordMatchScore, computeMaterialScore } from './engine/scoreboard.js';
 
 /** @type {any} */
 const THREE = THREE_NS;
@@ -873,6 +882,10 @@ export function initWizardChess() {
     scene.add(boardGroup);
     const squareHighlightsGroup = new THREE.Group();
     scene.add(squareHighlightsGroup);
+
+    const hoverArrowsGroup = new THREE.Group();
+    scene.add(hoverArrowsGroup);
+    let hoveredPieceKey = null;
     const boardSquareMeshes = [];
 
     function buildChessBoardGrid() {
@@ -1442,6 +1455,8 @@ export function initWizardChess() {
     let gameOver = false;
     let capturedByWhite = 0;
     let capturedByBlack = 0;
+    let capturedWhitePieces = [];
+    let capturedBlackPieces = [];
 
     // Mode & Player Configuration
     let gameMode = 'single'; // 'single' | 'pvp' | 'tournament' | 'multi'
@@ -1451,6 +1466,9 @@ export function initWizardChess() {
     let areTacticalBadgesEnabled = true;
     let pvpAutoFlipCamera = true;
     let activeTournamentMaster = null;
+    let aiDifficulty = loadDifficulty();
+    let pendingPromotion = null;
+    let matchScoreRecorded = false;
 
     // Multiplayer State
     let roomCode = null;
@@ -1689,6 +1707,8 @@ export function initWizardChess() {
         gameOver,
         capturedByWhite,
         capturedByBlack,
+        capturedWhitePieces: [...capturedWhitePieces],
+        capturedBlackPieces: [...capturedBlackPieces],
         scriptCursor,
         scriptedGameActive,
         scriptDeviated,
@@ -1730,6 +1750,8 @@ export function initWizardChess() {
       gameOver = snap.gameOver;
       capturedByWhite = snap.capturedByWhite;
       capturedByBlack = snap.capturedByBlack;
+      capturedWhitePieces = Array.isArray(snap.capturedWhitePieces) ? [...snap.capturedWhitePieces] : [];
+      capturedBlackPieces = Array.isArray(snap.capturedBlackPieces) ? [...snap.capturedBlackPieces] : [];
       if (typeof snap.scriptCursor === 'number') {
         scriptCursor = snap.scriptCursor;
       }
@@ -1775,11 +1797,16 @@ export function initWizardChess() {
       clearSquareHighlights();
       selectedSquare = null;
       validMoves = [];
+      pendingPromotion = null;
+      matchScoreRecorded = false;
+      window.dispatchEvent(new CustomEvent('wizardchess:promotion-cleared'));
       currentTurn = 'w';
       isAnimatingMove = false;
       gameOver = false;
       capturedByWhite = 0;
       capturedByBlack = 0;
+      capturedWhitePieces = [];
+      capturedBlackPieces = [];
       moveHistory = [];
       scriptDeviated = false;
       if (!preserveScript) {
@@ -1991,14 +2018,90 @@ export function initWizardChess() {
     // =========================================================================
     // Square Highlights
     // =========================================================================
+    function clearHoverArrows() {
+      hoveredPieceKey = null;
+      while (hoverArrowsGroup.children.length > 0) {
+        const child = hoverArrowsGroup.children[0];
+        hoverArrowsGroup.remove(child);
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+      }
+    }
+
+    function showHoverArrows(r, c, moves, isActiveTurnPiece = true) {
+      const key = `${r},${c},${isActiveTurnPiece ? 1 : 0}`;
+      if (hoveredPieceKey === key) return;
+      clearHoverArrows();
+      hoveredPieceKey = key;
+      if (!moves || moves.length === 0) return;
+
+      const startBase = boardToWorld(r, c);
+      const baseOpacity = isActiveTurnPiece ? 0.85 : 0.45;
+
+      for (const m of moves) {
+        const endBase = boardToWorld(m.r, m.c);
+        const colorHex = m.capture ? 0xff4d5a : m.castle ? 0xf5d76e : isActiveTurnPiece ? 0x4ea8de : 0x8ea4d2;
+
+        const startPt = new THREE.Vector3(startBase.x, BOARD_SURFACE_Y + 0.09, startBase.z);
+        const endPt = new THREE.Vector3(endBase.x, BOARD_SURFACE_Y + 0.08, endBase.z);
+        const dist = startPt.distanceTo(endPt);
+        const midPt = new THREE.Vector3(
+          (startPt.x + endPt.x) * 0.5,
+          BOARD_SURFACE_Y + Math.min(0.32, 0.14 + dist * 0.12),
+          (startPt.z + endPt.z) * 0.5
+        );
+
+        const curve = new THREE.QuadraticBezierCurve3(startPt, midPt, endPt);
+        const tubeGeo = new THREE.TubeGeometry(curve, 14, 0.013, 6, false);
+        const mat = new THREE.MeshBasicMaterial({
+          color: colorHex,
+          transparent: true,
+          opacity: baseOpacity,
+          depthWrite: false
+        });
+        const tubeMesh = new THREE.Mesh(tubeGeo, mat);
+        hoverArrowsGroup.add(tubeMesh);
+
+        // Arrowhead cone oriented along curve tangent at destination
+        const tangent = curve.getTangent(0.96).normalize();
+        const coneGeo = new THREE.ConeGeometry(0.038, 0.085, 8);
+        const coneMat = new THREE.MeshBasicMaterial({
+          color: colorHex,
+          transparent: true,
+          opacity: Math.min(1, baseOpacity + 0.1),
+          depthWrite: false
+        });
+        const coneMesh = new THREE.Mesh(coneGeo, coneMat);
+        coneMesh.position.copy(endPt);
+        coneMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tangent);
+        hoverArrowsGroup.add(coneMesh);
+
+        // Subtle landing halo ring on destination square
+        const ringGeo = new THREE.RingGeometry(0.085, 0.125, 24);
+        ringGeo.rotateX(-Math.PI / 2);
+        const ringMat = new THREE.MeshBasicMaterial({
+          color: colorHex,
+          transparent: true,
+          opacity: baseOpacity * 0.75,
+          side: THREE.DoubleSide,
+          depthWrite: false
+        });
+        const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+        ringMesh.position.set(endBase.x, BOARD_SURFACE_Y + 0.015, endBase.z);
+        hoverArrowsGroup.add(ringMesh);
+      }
+    }
+
     function clearSquareHighlights() {
       while (squareHighlightsGroup.children.length > 0) {
         squareHighlightsGroup.remove(squareHighlightsGroup.children[0]);
       }
+      clearHoverArrows();
     }
 
     function showSquareHighlights(r, c, moves) {
       clearSquareHighlights();
+      showHoverArrows(r, c, moves, true);
       const selGeo = new THREE.RingGeometry(0.115, 0.155, 32);
       selGeo.rotateX(-Math.PI / 2);
       const selMat = new THREE.MeshBasicMaterial({ color: 0xf5d76e, side: THREE.DoubleSide });
@@ -2163,7 +2266,7 @@ export function initWizardChess() {
           color: piece.color,
           from: { r: fromR, c: fromC },
           to: { r: toR, c: toC },
-          promotion: 'queen'
+          promotion: options.promotion || 'queen'
         });
       }
 
@@ -2513,10 +2616,12 @@ export function initWizardChess() {
           playPieceClip(castleRook, 'Idle', true, 0.18);
         }
 
-        // Pawn Promotion to Queen
+        // Pawn Promotion (Standard Chess: Queen, Rook, Bishop, or Knight)
         if (piece.type === 'pawn' && (toR === 0 || toR === 7)) {
+          const validPromotions = ['queen', 'rook', 'bishop', 'knight'];
+          const promoType = validPromotions.includes(options.promotion) ? options.promotion : 'queen';
           scene.remove(piece.mesh);
-          const promoted = instantiatePiece('queen', piece.color, toR, toC);
+          const promoted = instantiatePiece(promoType, piece.color, toR, toC);
           promoted.hasMoved = true;
           boardState[toR][toC] = promoted;
         } else {
@@ -2526,8 +2631,13 @@ export function initWizardChess() {
         }
 
         if (isCapture) {
-          if (piece.color === 'w') capturedByWhite += 1;
-          else capturedByBlack += 1;
+          if (piece.color === 'w') {
+            capturedByWhite += 1;
+            if (captured?.type) capturedWhitePieces.push(captured.type);
+          } else {
+            capturedByBlack += 1;
+            if (captured?.type) capturedBlackPieces.push(captured.type);
+          }
           activeDuelSavedCam = null;
           camera.position.copy(savedCamPos);
           orbitControls.target.copy(savedTarget);
@@ -2793,10 +2903,42 @@ export function initWizardChess() {
         const master = getCurrentMaster(tState);
         return selectAdaptiveAIMove(boardState, color, getAllLegalMoves, master.depth || 3);
       }
-      const mem = loadAdaptiveMemory();
-      const persona = getAdaptivePersona(mem);
-      const searchDepth = Math.min(4, 2 + Math.floor(persona.level / 3));
-      return selectAdaptiveAIMove(boardState, color, getAllLegalMoves, searchDepth);
+      const diffCfg = getDifficultyConfig(aiDifficulty);
+      return selectAdaptiveAIMove(boardState, color, getAllLegalMoves, diffCfg.depth, {
+        blunderChance: diffCfg.blunderChance,
+        noise: diffCfg.noise
+      });
+    }
+
+    function setDifficulty(level) {
+      aiDifficulty = saveDifficulty(level);
+      updateTurnUI();
+      window.dispatchEvent(new CustomEvent('wizardchess:difficulty-changed', { detail: { difficulty: aiDifficulty } }));
+      return aiDifficulty;
+    }
+
+    function getDifficulty() {
+      return aiDifficulty;
+    }
+
+    function completePendingPromotion(pieceType) {
+      if (!pendingPromotion) return false;
+      const validPromotions = ['queen', 'rook', 'bishop', 'knight'];
+      const chosen = validPromotions.includes(pieceType) ? pieceType : 'queen';
+      const { fromR, fromC, toR, toC } = pendingPromotion;
+      pendingPromotion = null;
+      window.dispatchEvent(new CustomEvent('wizardchess:promotion-cleared'));
+      return executeChessMove(fromR, fromC, toR, toC, { promotion: chosen });
+    }
+
+    function cancelPendingPromotion() {
+      if (!pendingPromotion) return false;
+      pendingPromotion = null;
+      clearSquareHighlights();
+      selectedSquare = null;
+      validMoves = [];
+      window.dispatchEvent(new CustomEvent('wizardchess:promotion-cleared'));
+      return true;
     }
 
     function triggerAIMoveNow() {
@@ -3475,17 +3617,25 @@ export function initWizardChess() {
         }
       }
 
-      // Record match outcome in adaptive memory
-      try {
-        const mem = loadAdaptiveMemory();
-        mem.gamesPlayed = (mem.gamesPlayed || 0) + 1;
-        if (winnerColor === playerColor) {
-          mem.playerWins = (mem.playerWins || 0) + 1;
-        } else {
-          mem.aiWins = (mem.aiWins || 0) + 1;
-        }
-        saveAdaptiveMemory(mem);
-      } catch (e) {}
+      // Record match outcome in adaptive memory & scoreboard (once per match)
+      if (!matchScoreRecorded) {
+        matchScoreRecorded = true;
+        try {
+          const mem = loadAdaptiveMemory();
+          mem.gamesPlayed = (mem.gamesPlayed || 0) + 1;
+          if (winnerColor === playerColor) {
+            mem.playerWins = (mem.playerWins || 0) + 1;
+          } else {
+            mem.aiWins = (mem.aiWins || 0) + 1;
+          }
+          saveAdaptiveMemory(mem);
+        } catch (e) {}
+
+        try {
+          recordMatchScore(gameMode, winnerColor, playerColor, 'Checkmate', moveHistory.length);
+          window.dispatchEvent(new CustomEvent('wizardchess:score-updated'));
+        } catch (e) {}
+      }
 
       if (overlay) {
         overlay.classList.add('visible');
@@ -3764,6 +3914,27 @@ export function initWizardChess() {
           }
         } else {
           turnText.textContent = 'Stalemate — Draw';
+          if (!matchScoreRecorded) {
+            matchScoreRecorded = true;
+            try {
+              const mem = loadAdaptiveMemory();
+              mem.gamesPlayed = (mem.gamesPlayed || 0) + 1;
+              mem.draws = (mem.draws || 0) + 1;
+              saveAdaptiveMemory(mem);
+            } catch (e) {}
+            try {
+              recordMatchScore(gameMode, 'draw', playerColor, 'Stalemate', moveHistory.length);
+              window.dispatchEvent(new CustomEvent('wizardchess:score-updated'));
+            } catch (e) {}
+            const overlay = document.getElementById('checkmate-overlay');
+            const titleEl = document.getElementById('checkmate-title');
+            const subEl = document.getElementById('checkmate-subtitle');
+            const crownEl = document.getElementById('checkmate-crown');
+            if (crownEl) crownEl.textContent = '⚖️';
+            if (titleEl) titleEl.textContent = 'Stalemate';
+            if (subEl) subEl.textContent = 'No Legal Moves Remaining • Match Drawn';
+            if (overlay) overlay.classList.add('visible');
+          }
         }
       } else {
         let turnLabel = currentTurn === 'w' ? 'White to Move' : 'Black to Move';
@@ -3789,7 +3960,8 @@ export function initWizardChess() {
           const master = getCurrentMaster(tState);
           modeBadge.textContent = `🏆 ${master.stageName} vs ${master.name} (${master.rating})`;
         } else {
-          modeBadge.textContent = `Playing as ${playerColor === 'w' ? 'White' : 'Black'} (Adaptive AI)`;
+          const diffCfg = getDifficultyConfig(aiDifficulty);
+          modeBadge.textContent = `Playing as ${playerColor === 'w' ? 'White' : 'Black'} (${diffCfg.label} AI)`;
         }
       }
 
@@ -3812,10 +3984,49 @@ export function initWizardChess() {
         roomPill.style.display = 'none';
       }
 
-      if (capturedByWhite > 0 || capturedByBlack > 0) {
-        capturedTray.textContent = `Captured — White: ${capturedByWhite} | Black: ${capturedByBlack}`;
-      } else {
-        capturedTray.textContent = '';
+      const mat = computeMaterialScore(boardState);
+      if (capturedTray) {
+        const hasAny =
+          capturedWhitePieces.length > 0 ||
+          capturedBlackPieces.length > 0 ||
+          capturedByWhite > 0 ||
+          capturedByBlack > 0 ||
+          mat.diff !== 0;
+
+        if (!hasAny) {
+          capturedTray.innerHTML = '';
+        } else {
+          const pieceOrder = { queen: 5, rook: 4, bishop: 3, knight: 2, pawn: 1 };
+          const whiteGlyphs = { queen: '♕', rook: '♖', bishop: '♗', knight: '♘', pawn: '♙' };
+          const blackGlyphs = { queen: '♛', rook: '♜', bishop: '♝', knight: '♞', pawn: '♟' };
+
+          const sortDesc = (arr) =>
+            arr.slice().sort((a, b) => (pieceOrder[b] || 0) - (pieceOrder[a] || 0));
+
+          const wIcons = sortDesc(capturedWhitePieces)
+            .map((t) => `<span class="cap-icon black-piece" title="Captured Black ${t}">${blackGlyphs[t] || '♟'}</span>`)
+            .join('');
+          const bIcons = sortDesc(capturedBlackPieces)
+            .map((t) => `<span class="cap-icon white-piece" title="Captured White ${t}">${whiteGlyphs[t] || '♙'}</span>`)
+            .join('');
+
+          const wAdv = mat.diff > 0 ? `<span class="cap-adv-badge">+${mat.diff}</span>` : '';
+          const bAdv = mat.diff < 0 ? `<span class="cap-adv-badge">+${Math.abs(mat.diff)}</span>` : '';
+
+          const parts = [];
+          if (wIcons || wAdv) {
+            parts.push(
+              `<span class="cap-group"><span class="cap-side-tag white">♔</span>${wIcons}${wAdv}</span>`
+            );
+          }
+          if (bIcons || bAdv) {
+            parts.push(
+              `<span class="cap-group"><span class="cap-side-tag black">♚</span>${bIcons}${bAdv}</span>`
+            );
+          }
+
+          capturedTray.innerHTML = parts.join('<span class="cap-divider">•</span>');
+        }
       }
       if (typeof updateScriptBarUI === 'function') updateScriptBarUI();
     }
@@ -3895,6 +4106,22 @@ export function initWizardChess() {
             (m.castle && m.r === clickedR && m.rookFromC === clickedC)
         );
         if (move) {
+          const movingPiece = boardState[selectedSquare.r][selectedSquare.c];
+          if (movingPiece && movingPiece.type === 'pawn' && (move.r === 0 || move.r === 7)) {
+            pendingPromotion = {
+              fromR: selectedSquare.r,
+              fromC: selectedSquare.c,
+              toR: move.r,
+              toC: move.c,
+              color: movingPiece.color
+            };
+            window.dispatchEvent(
+              new CustomEvent('wizardchess:promotion-required', {
+                detail: { ...pendingPromotion }
+              })
+            );
+            return;
+          }
           executeChessMove(selectedSquare.r, selectedSquare.c, move.r, move.c);
           return;
         }
@@ -3943,12 +4170,29 @@ export function initWizardChess() {
               hoverBanner.style.display = 'inline-flex';
               hoverBanner.textContent = `${cfg.symbol || '✦'} ${colorName} ${cfg.label || p.type} (${file}${rank})`;
             }
+            const legal = getLegalMovesForPiece(p.r, p.c);
+            showHoverArrows(p.r, p.c, legal, p.color === currentTurn);
             return;
           }
           obj = obj.parent;
         }
       }
       if (hoverBanner) hoverBanner.style.display = 'none';
+      if (selectedSquare && validMoves.length > 0) {
+        showHoverArrows(selectedSquare.r, selectedSquare.c, validMoves, true);
+      } else {
+        clearHoverArrows();
+      }
+    });
+
+    renderer.domElement.addEventListener('pointerleave', () => {
+      const hoverBanner = document.getElementById('piece-hover-banner');
+      if (hoverBanner) hoverBanner.style.display = 'none';
+      if (selectedSquare && validMoves.length > 0) {
+        showHoverArrows(selectedSquare.r, selectedSquare.c, validMoves, true);
+      } else {
+        clearHoverArrows();
+      }
     });
 
     // =========================================================================
@@ -4569,6 +4813,10 @@ export function initWizardChess() {
       startTournamentStage,
       toggleTacticalBadges,
       setPvpAutoFlip,
+      setDifficulty,
+      getDifficulty,
+      completePendingPromotion,
+      cancelPendingPromotion,
       holdCameraKey: (code, down = true) => {
         if (down) heldCameraKeys.add(code);
         else heldCameraKeys.delete(code);
@@ -4671,6 +4919,8 @@ export function initWizardChess() {
         checkmateState: { ...checkmateState },
         capturedByWhite,
         capturedByBlack,
+        capturedWhitePieces: [...capturedWhitePieces],
+        capturedBlackPieces: [...capturedBlackPieces],
         cameraPos: camera.position.toArray(),
         cameraTarget: orbitControls.target.toArray(),
         playerCamSide,
